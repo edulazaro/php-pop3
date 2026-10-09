@@ -1,0 +1,41 @@
+{
+    "name": "edulazaro/php-pop3",
+    "description": "A read-only POP3 client in plain PHP: SSL or STARTTLS, certificate checks you control, unique ids, headers or whole messages, and nothing that deletes. No extensions, no dependencies.",
+    "keywords": [
+        "pop3",
+        "pop",
+        "email",
+        "mail",
+        "mailbox",
+        "client"
+    ],
+    "license": "MIT",
+    "type": "library",
+    "require": {
+        "php": ">=8.2"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^10.0|^11.0|^12.0"
+    },
+    "suggest": {
+        "webklex/php-imap": "Parse the raw messages: Webklex\\PHPIMAP\\Message::fromString($raw)."
+    },
+    "autoload": {
+        "psr-4": {
+            "EduLazaro\\Pop3\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "EduLazaro\\Pop3\\Tests\\": "tests/"
+        }
+    },
+    "authors": [
+        {
+            "name": "Edu Lazaro",
+            "email": "edu@edulazaro.com"
+        }
+    ],
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}

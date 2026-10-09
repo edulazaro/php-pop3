@@ -1,0 +1,54 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    name: PHP ${{ matrix.php }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.2', '8.3', '8.4', '8.5']
+
+    services:
+      greenmail:
+        image: greenmail/standalone:latest
+        env:
+          GREENMAIL_OPTS: -Dgreenmail.setup.test.all -Dgreenmail.hostname=0.0.0.0 -Dgreenmail.auth.disabled
+        ports:
+          - 3025:3025
+          - 3110:3110
+          - 3995:3995
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: openssl
+          coverage: none
+
+      - name: Install dependencies
+        run: composer update --prefer-dist --no-interaction --no-progress
+
+      - name: Wait for GreenMail
+        run: |
+          for i in $(seq 1 30); do nc -z 127.0.0.1 3110 && exit 0; sleep 2; done
+          echo "GreenMail did not start" && exit 1
+
+      - name: Run tests
+        env:
+          POP3_TEST_HOST: 127.0.0.1
+        run: vendor/bin/phpunit
