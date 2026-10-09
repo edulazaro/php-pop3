@@ -9,7 +9,7 @@
     <a href="LICENSE"><img src="https://img.shields.io/packagist/l/edulazaro/php-pop3" alt="License"></a>
 </p>
 
-A read-only POP3 client in plain PHP. It connects over SSL or STARTTLS with a certificate check you control, lists the messages with their unique ids, reads a message's headers or the whole of it, and leaves the mailbox exactly as it was: there is nothing here that deletes. No PHP extension beyond OpenSSL, no dependencies, any framework or none.
+A POP3 client in plain PHP. It connects over SSL or STARTTLS with a certificate check you control, signs in with a password, APOP or an OAuth token, lists the messages with their unique ids, reads a message's headers or the whole of it, and deletes only when you ask: reading leaves the mailbox exactly as it was. No PHP extension beyond OpenSSL, no dependencies, any framework or none.
 
 PHP's `imap` extension, which most mail libraries use for POP3, left PHP's core in 8.4, and the pure-PHP POP3 clients left are unmaintained. This package does the one job they did: talk to the server. Parsing the messages it hands back is left to a mail parser, such as [webklex/php-imap](https://github.com/Webklex/php-imap).
 
@@ -63,7 +63,22 @@ $headers = $pop->top($number);       // headers only
 $preview = $pop->top($number, 10);   // headers and the first 10 lines
 ```
 
-`status()` gives the count and total size, and `sizes()` each message's size, to skip one that is too big.
+`status()` gives the count and total size, and `sizes()` each message's size, to skip one that is too big. `size($number)` and `uid($number)` ask for one message only.
+
+## Sign in
+
+Four ways, depending on what the server accepts:
+
+```php
+$pop->login('info@example.com', 'secret');            // USER and PASS, the classic
+$pop->loginApop('info@example.com', 'secret');        // APOP: proves the secret without sending it
+$pop->loginPlain('info@example.com', 'secret');       // AUTH PLAIN (SASL)
+$pop->loginOAuth('info@example.com', $accessToken);   // AUTH XOAUTH2, for Microsoft 365 and Gmail
+```
+
+`loginApop()` works only when the server's greeting carries a timestamp; without one it fails before sending anything. `loginOAuth()` takes an access token you already have: obtaining and refreshing it (Microsoft Entra ID, Google) is your application's job. Microsoft 365 and Gmail no longer accept a plain password over POP3, so with them this is the only way in. A refused token fails with the server's reason, decoded, in the exception's message.
+
+`capabilities()` lists what the server announces (`CAPA`), such as `SASL PLAIN XOAUTH2`, `TOP`, `UIDL` or `STLS`, and returns an empty list from a server that does not support the command. `noop()` keeps a long session alive.
 
 ## Encryption and certificates
 
@@ -106,16 +121,27 @@ Every failure is an `EduLazaro\Pop3\Exceptions\Pop3Exception`, so one `catch` ha
 | Exception | When |
 |---|---|
 | `ConnectionFailed` | The server cannot be reached, the TLS handshake fails (a certificate that does not verify), it does not greet, or it stops answering |
-| `AuthenticationFailed` | The user or the password is refused. The message carries the server's words, never the password |
+| `AuthenticationFailed` | The user, password or token is refused, or the server offers no APOP. The message carries the server's words, never the secret |
 | `CommandFailed` | The server answers `-ERR`: a message that does not exist, or a command it does not support (`UIDL` and `TOP` are optional in the standard) |
 
 A user or password with a line break is refused before anything is sent, so a value cannot inject commands of its own.
 
-## Read-only on purpose
+## Deleting
 
-The client never sends `DELE`. POP3 keeps no read or unread mark on the server either, so reading changes nothing for the people who use the mailbox: their own mail program decides what it shows them.
+Reading never deletes: POP3 keeps no read or unread mark on the server, so reading changes nothing for the people who use the mailbox. Deleting is explicit, and follows the standard: `delete()` marks a message, `reset()` unmarks everything, and the server removes what is marked only when the session ends with `quit()`:
 
-One thing does matter when several readers share a POP3 mailbox: a mail program set to remove messages after downloading them deletes them for everybody. If another program reads the same mailbox, check that it leaves a copy on the server.
+```php
+foreach ($pop->uids() as $number => $uid) {
+    $store->save($uid, $pop->retrieve($number));
+    $pop->delete($number);
+}
+
+$pop->quit();   // the marked messages go now, and not before
+```
+
+`marked()` lists the numbers marked so far. If anything fails on the way (an exception, the client going out of scope), the client closes without `QUIT`, so the standard says nothing is removed. Some servers delete on any disconnect all the same (GreenMail does), so to change your mind call `reset()` rather than rely on dropping the connection.
+
+When several readers share a POP3 mailbox, deleting deletes for everybody. The same goes for a mail program set to remove messages after downloading them: if another program reads the same mailbox, check that it leaves a copy on the server.
 
 ## Testing
 

@@ -8,13 +8,19 @@ use EduLazaro\Pop3\Exceptions\ConnectionFailed;
 use InvalidArgumentException;
 
 /**
- * A read-only POP3 client (RFC 1939, STLS from RFC 2595).
+ * A POP3 client (RFC 1939; STLS and CAPA from RFC 2449/2595; SASL PLAIN and XOAUTH2 from
+ * RFC 5034).
  *
  * It lists the messages with their unique ids, reads a message's headers or the whole of it,
- * and leaves. It never deletes: there is no DELE here, so the mailbox stays as its owners see
- * it, and POP3 keeps no read or unread mark on the server for it to change. Messages come back
- * raw, as the server sent them; parse them with whatever you like (`webklex/php-imap`:
- * `Message::fromString($raw)`).
+ * and deletes only when asked. POP3 keeps no read or unread mark on the server, so reading
+ * changes nothing. Messages come back raw, as the server sent them; parse them with whatever
+ * you like (`webklex/php-imap`: `Message::fromString($raw)`).
+ *
+ * Deleting follows the standard: `delete()` marks, `reset()` unmarks, and the server applies
+ * the marks only when the session ends with `quit()`. A session that ends any other way (an
+ * exception, an object going out of scope) closes WITHOUT quitting, so nothing marked is
+ * deleted by accident. Some servers delete on any disconnect all the same (GreenMail does,
+ * against RFC 1939 section 6): to change your mind, call `reset()`, never rely on dropping.
  *
  *     $pop = Client::connect('pop.example.com');
  *     $pop->login('info@example.com', 'secret');
@@ -32,12 +38,18 @@ final class Client
 {
     private bool $open = true;
 
+    /** What followed the greeting's +OK: holds the APOP timestamp, when the server offers it. */
+    private string $greeting;
+
+    /** @var array<int, true> Message numbers marked for deletion in this session. */
+    private array $marked = [];
+
     /**
      * @param  Connection  $connection  A connection whose greeting has not been read yet.
      */
     public function __construct(private Connection $connection)
     {
-        $this->expectOk($this->connection->readLine(), ConnectionFailed::class);
+        $this->greeting = $this->expectOk($this->connection->readLine(), ConnectionFailed::class);
     }
 
     /**
@@ -90,17 +102,97 @@ final class Client
      */
     public function login(string $user, string $password): void
     {
-        foreach ([$user, $password] as $value) {
-            if (preg_match('/[\r\n]/', $value)) {
-                throw new InvalidArgumentException('A user or password cannot contain a line break.');
-            }
-        }
+        $this->refuseLineBreaks($user, $password);
 
         $this->send("USER {$user}");
         $this->expectOk($this->connection->readLine(), AuthenticationFailed::class);
 
         $this->send("PASS {$password}");
         $this->expectOk($this->connection->readLine(), AuthenticationFailed::class);
+    }
+
+    /**
+     * APOP: proves the password without sending it, with an MD5 of the greeting's timestamp and
+     * the secret. Only for servers that offer it (their greeting carries `<…@…>`).
+     *
+     * @param  string  $user
+     * @param  string  $secret
+     * @return void
+     *
+     * @throws AuthenticationFailed When refused, or when the server does not offer APOP.
+     */
+    public function loginApop(string $user, string $secret): void
+    {
+        $this->refuseLineBreaks($user, $secret);
+
+        if (! preg_match('/<[^<>]+@[^<>]+>/', $this->greeting, $timestamp)) {
+            throw new AuthenticationFailed('The server does not offer APOP: its greeting has no timestamp.');
+        }
+
+        $this->send("APOP {$user} ".md5($timestamp[0].$secret));
+        $this->expectOk($this->connection->readLine(), AuthenticationFailed::class);
+    }
+
+    /**
+     * AUTH XOAUTH2: signs in with an OAuth access token instead of a password, as Microsoft 365
+     * and Gmail require. Getting the token (client credentials, a refresh token) is the
+     * caller's; this only presents it.
+     *
+     * @param  string  $user  The mailbox address.
+     * @param  string  $accessToken
+     * @return void
+     *
+     * @throws AuthenticationFailed With the server's reason when it gives one.
+     */
+    public function loginOAuth(string $user, string $accessToken): void
+    {
+        $this->refuseLineBreaks($user, $accessToken);
+        $this->sasl('XOAUTH2', base64_encode("user={$user}\x01auth=Bearer {$accessToken}\x01\x01"));
+    }
+
+    /**
+     * AUTH PLAIN: user and password in one SASL message. Over TLS it is as safe as USER/PASS;
+     * some servers accept only this.
+     *
+     * @param  string  $user
+     * @param  string  $password
+     * @return void
+     *
+     * @throws AuthenticationFailed
+     */
+    public function loginPlain(string $user, string $password): void
+    {
+        $this->refuseLineBreaks($user, $password);
+        $this->sasl('PLAIN', base64_encode("\0{$user}\0{$password}"));
+    }
+
+    /**
+     * What the server says it supports (CAPA): `TOP`, `UIDL`, `STLS`, `SASL PLAIN XOAUTH2`…
+     * An empty list when the server does not answer CAPA, which is optional too.
+     *
+     * @return list<string>
+     */
+    public function capabilities(): array
+    {
+        try {
+            $this->command('CAPA');
+        } catch (CommandFailed) {
+            return [];
+        }
+
+        return array_values(array_filter(array_map('trim', preg_split('/\r\n|\n/', $this->readMultiline()))));
+    }
+
+    /**
+     * Keeps the session alive (NOOP), for a reader that pauses between messages.
+     *
+     * @return void
+     *
+     * @throws CommandFailed
+     */
+    public function noop(): void
+    {
+        $this->command('NOOP');
     }
 
     /**
@@ -129,6 +221,32 @@ final class Client
         $this->command('LIST');
 
         return array_map('intval', $this->pairs($this->readMultiline()));
+    }
+
+    /**
+     * One message's size in bytes (LIST n).
+     *
+     * @param  int  $number
+     * @return int
+     *
+     * @throws CommandFailed When there is no such message.
+     */
+    public function size(int $number): int
+    {
+        return (int) ($this->pairs($this->command("LIST {$number}"))[$number] ?? 0);
+    }
+
+    /**
+     * One message's unique id (UIDL n).
+     *
+     * @param  int  $number
+     * @return string
+     *
+     * @throws CommandFailed When there is no such message, or the server does not support UIDL.
+     */
+    public function uid(int $number): string
+    {
+        return $this->pairs($this->command("UIDL {$number}"))[$number] ?? '';
     }
 
     /**
@@ -179,11 +297,68 @@ final class Client
     }
 
     /**
-     * Ends the session (QUIT) and closes the connection. Safe to call twice.
+     * Marks a message for deletion (DELE). Nothing is deleted until `quit()`; until then the
+     * message cannot be read in this session and `reset()` unmarks it.
+     *
+     * @param  int  $number
+     * @return void
+     *
+     * @throws CommandFailed When there is no such message, or it is already marked.
+     */
+    public function delete(int $number): void
+    {
+        $this->command("DELE {$number}");
+        $this->marked[$number] = true;
+    }
+
+    /**
+     * Unmarks every message marked in this session (RSET).
+     *
+     * @return void
+     *
+     * @throws CommandFailed
+     */
+    public function reset(): void
+    {
+        $this->command('RSET');
+        $this->marked = [];
+    }
+
+    /**
+     * The message numbers marked for deletion in this session.
+     *
+     * @return list<int>
+     */
+    public function marked(): array
+    {
+        return array_keys($this->marked);
+    }
+
+    /**
+     * Ends the session (QUIT): the server deletes what was marked, and the connection closes.
+     * Safe to call twice.
      *
      * @return void
      */
     public function quit(): void
+    {
+        $this->close(true);
+    }
+
+    /**
+     * A client dropped without quit() says goodbye only when nothing is marked: with marks
+     * pending it closes without QUIT, so they are not applied by accident.
+     */
+    public function __destruct()
+    {
+        $this->close($this->marked === []);
+    }
+
+    /**
+     * @param  bool  $quit  Whether to send QUIT, which applies the deletions.
+     * @return void
+     */
+    private function close(bool $quit): void
     {
         if (! $this->open) {
             return;
@@ -192,8 +367,11 @@ final class Client
         $this->open = false;
 
         try {
-            $this->connection->writeLine('QUIT');
-            $this->connection->readLine();
+            if ($quit) {
+                $this->connection->writeLine('QUIT');
+                $this->connection->readLine();
+                $this->marked = [];
+            }
         } catch (ConnectionFailed) {
         } finally {
             $this->connection->close();
@@ -201,11 +379,46 @@ final class Client
     }
 
     /**
-     * A client dropped without quit() still says goodbye.
+     * A SASL exchange with an initial response. When the server sends a challenge instead of
+     * an answer, it is an error report (XOAUTH2 sends its reason so): an empty line ends the
+     * exchange and the server's reason goes into the exception.
+     *
+     * @param  string  $mechanism
+     * @param  string  $initialResponse  Base64.
+     * @return void
+     *
+     * @throws AuthenticationFailed
      */
-    public function __destruct()
+    private function sasl(string $mechanism, string $initialResponse): void
     {
-        $this->quit();
+        $this->send("AUTH {$mechanism} {$initialResponse}");
+        $answer = $this->connection->readLine();
+
+        if (str_starts_with($answer, '+ ') || rtrim($answer, "\r\n") === '+') {
+            $reason = base64_decode(trim(substr($answer, 1)), true) ?: trim(substr($answer, 1));
+            $this->connection->writeLine('');
+            $this->connection->readLine();
+
+            throw new AuthenticationFailed('The server refused the '.$mechanism.' sign-in'.($reason !== '' ? ': '.$reason : '.'));
+        }
+
+        $this->expectOk($answer, AuthenticationFailed::class);
+    }
+
+    /**
+     * A value with a line break would let it inject commands of its own: refused before anything
+     * is sent.
+     *
+     * @param  string  ...$values
+     * @return void
+     */
+    private function refuseLineBreaks(string ...$values): void
+    {
+        foreach ($values as $value) {
+            if (preg_match('/[\r\n]/', $value)) {
+                throw new InvalidArgumentException('A user, password or token cannot contain a line break.');
+            }
+        }
     }
 
     /**

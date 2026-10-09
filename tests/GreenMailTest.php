@@ -89,4 +89,37 @@ class GreenMailTest extends TestCase
         $this->expectException(ConnectionFailed::class);
         Client::connect($this->host, $port, Encryption::Ssl);
     }
+
+    /**
+     * Not tested here: a client dropped with marks pending. It sends no QUIT (ClientTest proves
+     * it), but GreenMail deletes on any disconnect, against RFC 1939 section 6.
+     *
+     * @return void
+     */
+    public function test_a_message_is_deleted_only_when_the_session_quits(): void
+    {
+        $user = $this->deliver('Para borrar');
+        $port = (int) (getenv('POP3_TEST_POP_PORT') ?: 3110);
+        $count = function () use ($user, $port): int {
+            $pop = Client::connect($this->host, $port, Encryption::None);
+            $pop->login($user, 'secret');
+            $count = count($pop->uids());
+            $pop->quit();
+
+            return $count;
+        };
+
+        $pop = Client::connect($this->host, $port, Encryption::None);
+        $pop->login($user, 'secret');
+        $pop->delete(1);
+        $pop->reset();
+        $pop->quit();
+        $this->assertSame(1, $count(), 'reset() unmarks');
+
+        $pop = Client::connect($this->host, $port, Encryption::None);
+        $pop->login($user, 'secret');
+        $pop->delete(1);
+        $pop->quit();
+        $this->assertSame(0, $count(), 'quit() applies the mark');
+    }
 }

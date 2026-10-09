@@ -1,6 +1,6 @@
 {
     "name": "edulazaro/php-pop3",
-    "description": "A read-only POP3 client in plain PHP: SSL or STARTTLS, certificate checks you control, unique ids, headers or whole messages, and nothing that deletes. No extensions, no dependencies.",
+    "description": "A POP3 client in plain PHP: SSL or STARTTLS, certificate checks you control, password, APOP or OAuth sign-in, unique ids, headers or whole messages, and deletion only when asked. No extensions, no dependencies.",
     "keywords": [
         "pop3",
         "pop",

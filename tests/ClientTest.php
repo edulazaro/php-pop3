@@ -125,4 +125,121 @@ class ClientTest extends TestCase
         $this->expectException(ConnectionFailed::class);
         $pop->uids();
     }
+
+    public function test_deleting_marks_and_only_quit_applies_it(): void
+    {
+        $server = new ScriptedConnection(['+OK', '+OK marked', '+OK marked', '+OK reset', '+OK marked', '+OK bye']);
+        $pop = new Client($server);
+
+        $pop->delete(1);
+        $pop->delete(2);
+        $this->assertSame([1, 2], $pop->marked());
+
+        $pop->reset();
+        $this->assertSame([], $pop->marked());
+
+        $pop->delete(2);
+        $pop->quit();
+
+        $this->assertSame(['DELE 1', 'DELE 2', 'RSET', 'DELE 2', 'QUIT'], $server->sent);
+        $this->assertSame([], $pop->marked());
+    }
+
+    public function test_marks_pending_when_the_client_is_dropped_are_not_applied(): void
+    {
+        $server = new ScriptedConnection(['+OK', '+OK marked']);
+        $pop = new Client($server);
+        $pop->delete(1);
+
+        unset($pop);
+
+        $this->assertSame(['DELE 1'], $server->sent);
+        $this->assertTrue($server->closed);
+    }
+
+    public function test_a_dropped_client_without_marks_still_says_goodbye(): void
+    {
+        $server = new ScriptedConnection(['+OK', '+OK bye']);
+        $pop = new Client($server);
+
+        unset($pop);
+
+        $this->assertSame(['QUIT'], $server->sent);
+    }
+
+    public function test_apop_proves_the_secret_without_sending_it(): void
+    {
+        $server = new ScriptedConnection(['+OK POP3 ready <1896.697170952@dbc.mtview.ca.us>', '+OK maildrop has 1 message']);
+        $pop = new Client($server);
+
+        $pop->loginApop('mrose', 'tanstaaf');
+
+        $this->assertSame(['APOP mrose c4c9334bac560ecc979e58001b3e22fb'], $server->sent);
+        $this->assertStringNotContainsString('tanstaaf', implode("\n", $server->sent));
+    }
+
+    public function test_apop_is_refused_by_a_server_without_a_timestamp(): void
+    {
+        $server = new ScriptedConnection(['+OK POP3 ready']);
+        $pop = new Client($server);
+
+        $this->expectException(\EduLazaro\Pop3\Exceptions\AuthenticationFailed::class);
+
+        try {
+            $pop->loginApop('mrose', 'tanstaaf');
+        } finally {
+            $this->assertSame([], $server->sent);
+        }
+    }
+
+    public function test_oauth_and_plain_sign_in(): void
+    {
+        $server = new ScriptedConnection(['+OK', '+OK signed in']);
+        $pop = new Client($server);
+        $pop->loginOAuth('info@example.com', 'token-123');
+
+        $this->assertSame('AUTH XOAUTH2 '.base64_encode("user=info@example.com\x01auth=Bearer token-123\x01\x01"), $server->sent[0]);
+
+        $server = new ScriptedConnection(['+OK', '+OK']);
+        (new Client($server))->loginPlain('info@example.com', 'secret');
+
+        $this->assertSame('AUTH PLAIN '.base64_encode("\0info@example.com\0secret"), $server->sent[0]);
+    }
+
+    public function test_a_refused_token_reports_the_servers_reason(): void
+    {
+        $reason = '{"status":"401","schemes":"bearer","scope":"https://outlook.office365.com/.default"}';
+        $server = new ScriptedConnection(['+OK', '+ '.base64_encode($reason), '-ERR authentication failed']);
+        $pop = new Client($server);
+
+        try {
+            $pop->loginOAuth('info@example.com', 'expired');
+            $this->fail('No exception.');
+        } catch (\EduLazaro\Pop3\Exceptions\AuthenticationFailed $e) {
+            $this->assertStringContainsString('"status":"401"', $e->getMessage());
+            $this->assertStringNotContainsString('expired', $e->getMessage());
+        }
+
+        $this->assertSame('', $server->sent[1]);
+    }
+
+    public function test_capabilities_noop_and_one_message(): void
+    {
+        $server = new ScriptedConnection([
+            '+OK',
+            '+OK capability list follows', 'TOP', 'UIDL', 'SASL PLAIN XOAUTH2', 'STLS', '.',
+            '+OK',
+            '+OK 2 200',
+            '+OK 2 uid-b',
+        ]);
+        $pop = new Client($server);
+
+        $this->assertSame(['TOP', 'UIDL', 'SASL PLAIN XOAUTH2', 'STLS'], $pop->capabilities());
+        $pop->noop();
+        $this->assertSame(200, $pop->size(2));
+        $this->assertSame('uid-b', $pop->uid(2));
+        $this->assertSame(['CAPA', 'NOOP', 'LIST 2', 'UIDL 2'], $server->sent);
+
+        $this->assertSame([], (new Client(new ScriptedConnection(['+OK', '-ERR unknown command'])))->capabilities());
+    }
 }
