@@ -20,7 +20,7 @@
 
   <text x="80" y="150" font-family="'DejaVu Sans', Arial, sans-serif" font-size="84" font-weight="800" fill="#ffffff" letter-spacing="-1">PHP POP3</text>
   <rect x="84" y="172" width="64" height="6" rx="3" fill="#ec4899"/>
-  <text x="80" y="222" font-family="'DejaVu Sans', Arial, sans-serif" font-size="30" font-weight="400" fill="#aeb6c9">A read-only POP3 client in plain PHP</text>
+  <text x="80" y="222" font-family="'DejaVu Sans', Arial, sans-serif" font-size="30" font-weight="400" fill="#aeb6c9">A POP3 client in plain PHP, no extensions</text>
 
   <!-- pie: izquierda = icono GitHub + handle | derecha = dominio -->
   <g transform="translate(80 254)">
